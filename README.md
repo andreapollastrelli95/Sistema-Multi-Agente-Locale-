@@ -1,153 +1,47 @@
-🤖 Sistema Multi-Agente Locale — LangGraph + Ollama
+# Sistema multi-agente locale
 
-Sistema multi-agente completamente locale basato su **LangGraph**, **Ollama** e **ChromaDB**.  
-Nessuna API esterna richiesta — tutto gira in locale
+Un assistente a riga di comando che smista ogni richiesta allo specialista adatto e fa rivedere la risposta da un agente critico. Usa LangGraph, Ollama e ChromaDB, senza API esterne.
 
----
+## Flusso
 
-## 📂 Struttura del Progetto
-
-```
-.
-├── main_agent.py          # Entry point + grafo LangGraph + CLI interattiva
-├── requirements.txt       # Dipendenze Python
-├── agents/
-│   ├── __init__.py
-│   ├── router.py          # Agente router: smista le query allo specialista corretto
-│   ├── doc_agent.py       # Agente documenti: RAG con ChromaDB + Ollama embeddings
-│   ├── coder_agent.py     # Agente coder: generazione ed esecuzione codice Python
-│   └── critic_agent.py    # Agente critico: validazione e sintesi della risposta
-├── documents/             # (auto-creata) Cartella per i tuoi documenti locali
-└── chroma_db/             # (auto-creata) Vector store persistente ChromaDB
+```text
+richiesta → router ─┬─ doc_agent ───┐
+                    └─ coder_agent ─┴─ critic_agent → risposta
 ```
 
----
+- **Router:** sceglie lo specialista. Se indica `critic_agent` o una risposta non valida, la richiesta passa a `doc_agent`.
+- **Doc agent:** cerca nei documenti di `documents/` con ChromaDB e `nomic-embed-text`. L'indice si ricostruisce quando i file cambiano.
+- **Coder agent:** scrive codice Python e, solo se autorizzato, lo esegue.
+- **Critic agent:** riscrive la risposta e le assegna un punteggio. È un'autovalutazione del modello, non una misura oggettiva.
 
-## 🔄 Flusso di Esecuzione
-
-```
-[Input Utente]
-      │
-      ▼
-  🔀 Router          ← analizza e smista la richiesta
-      │
-      ├──▶ 📄 Doc Agent    (domande su documenti/knowledge base)
-      ├──▶ 💻 Coder Agent  (codice Python, data analysis)
-      └──▶ 🔍 Critic Agent (direttamente per sintesi/validazione)
-                │
-                ▼
-          🔍 Critic Agent  ← valida, de-allucinates, sintetizza
-                │
-                ▼
-         [Output Finale]
-```
-
----
-
-## ⚙️ Prerequisiti
-
-### 1. Installa Ollama
-Scarica e installa [Ollama](https://ollama.ai) per il tuo sistema operativo.
-
-### 2. Scarica i modelli necessari
-```bash
-# Modello principale per ragionamento e routing
-ollama pull deepseek-r1:8b
-
-# Modello per gli embeddings (ricerca semantica documenti)
-ollama pull nomic-embed-text
-```
-
-### 3. Avvia il server Ollama
-```bash
-ollama serve
-```
-
----
-
-## 🚀 Installazione ed Esecuzione
+## Avvio
 
 ```bash
-# 1. Installa le dipendenze Python
 pip install -r requirements.txt
-
-# 2. Avvia il sistema multi-agente
+ollama pull deepseek-r1:8b
+ollama pull nomic-embed-text
 python main_agent.py
 ```
 
----
+`documents/` contiene un documento dimostrativo con dati fittizi; si possono aggiungere file `.txt` e `.pdf`. Nella CLI sono disponibili `exit`, `clear` e `history`.
 
-## 📄 Aggiungere Documenti alla Knowledge Base
+## Esecuzione del codice
 
-Inserisci i tuoi file nella cartella `documents/` prima di avviare il sistema.  
-Formati supportati: `.txt`, `.pdf`
+Per impostazione predefinita il codice generato viene solo mostrato. Con `python main_agent.py --esegui-codice` viene eseguito in un processo separato, in una cartella temporanea e con un limite di 30 secondi. Prima un controllo blocca gli import fuori da una lista consentita e l'accesso esplicito ai file.
 
-```
-documents/
-├── manuale_tecnico.pdf
-├── note_progetto.txt
-└── report_analisi.pdf
-```
+**Non è una sandbox di sicurezza.** Usa questa opzione solo se comprendi il rischio, oppure esegui il programma in un container o una macchina virtuale.
 
-Al primo avvio con documenti disponibili, ChromaDB verrà popolato automaticamente.  
-Gli indici vengono salvati in `chroma_db/` e riutilizzati nelle sessioni successive.
+## Test
 
----
-
-## 💡 Esempi di Utilizzo
-
-```
-👤 Tu: Scrivi uno script Python per analizzare un CSV con pandas e visualizzare le statistiche
-→ Instradato a: coder_agent
-
-👤 Tu: Cosa dice il documento sul contratto del fornitore?
-→ Instradato a: doc_agent
-
-👤 Tu: Riassumi e valida questa spiegazione: [testo]
-→ Instradato a: critic_agent
+```bash
+pip install -r requirements-dev.txt
+pytest
 ```
 
----
+I test simulano il modello, quindi coprono la logica del grafo e degli agenti, non la qualità delle risposte di DeepSeek.
 
-## 🛠️ Comandi CLI
+## Limiti
 
-| Comando   | Descrizione                          |
-|-----------|--------------------------------------|
-| `exit`    | Chiude il sistema                    |
-| `quit`    | Chiude il sistema                    |
-| `clear`   | Pulisce lo schermo                   |
-| `history` | Mostra lo storico della sessione     |
-
----
-
-## 🔧 Configurazione
-
-Modifica le costanti in cima a `main_agent.py` per personalizzare:
-
-```python
-REASONING_MODEL = "deepseek-r1:8b"     # Modello Ollama da usare
-OLLAMA_BASE_URL = "http://localhost:11434"  # URL del server Ollama
-```
-
-Modifica `agents/doc_agent.py` per cambiare il modello di embedding:
-
-```python
-EMBEDDING_MODEL = "nomic-embed-text"   # Modello embedding Ollama
-CHUNK_SIZE = 1000                       # Dimensione chunk documenti
-CHUNK_OVERLAP = 200                     # Overlap tra chunk
-```
-
----
-
-## 📦 Dipendenze
-
-| Libreria             | Utilizzo                                  |
-|----------------------|-------------------------------------------|
-| `langgraph`          | Orchestrazione del grafo multi-agente     |
-| `langchain`          | Framework base per gli agenti LLM         |
-| `langchain-community`| Loader documenti, vector stores           |
-| `langchain-ollama`   | Integrazione con Ollama LLM               |
-| `chromadb`           | Vector store locale per RAG               |
-| `ollama`             | Client Python per Ollama                  |
-| `pydantic`           | Validazione dati e modelli                |
-| `pandas`             | Data analysis nell'agente coder           |
+- Non conserva la conversazione: ogni richiesta è indipendente, e `history` mostra solo le domande della sessione.
+- Il critico usa lo stesso modello che ha generato la risposta e può introdurre errori riscrivendola.
+- `langchain-community`, usato per Chroma e per il caricamento dei documenti, è in fase di dismissione: in futuro andrà sostituito.
