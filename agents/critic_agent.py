@@ -3,8 +3,13 @@ critic_agent.py - Agente Critico/Validatore
 Controlla l'output degli altri agenti, elimina le allucinazioni e sintetizza la risposta finale.
 """
 
+import re
+from typing import Optional
+
 from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage, SystemMessage
+
+from agents.utils import strip_think
 
 
 CRITIC_SYSTEM_PROMPT = """Sei un agente validatore critico e sintetizzatore esperto.
@@ -15,7 +20,7 @@ I tuoi compiti:
 2. **Elimina allucinazioni**: Identifica e rimuovi affermazioni non supportate o palesemente errate
 3. **Migliora chiarezza**: Ristruttura la risposta per renderla più chiara e leggibile
 4. **Sintetizza**: Condensa le informazioni essenziali eliminando ridondanze
-5. **Valuta qualità**: Assegna un punteggio di qualità da 1 a 10
+5. **Valuta qualità**: Assegna un punteggio da 1 a 10
 
 Formato risposta richiesto:
 ---
@@ -75,12 +80,12 @@ Fornisci una versione migliorata, accurata e ben strutturata della risposta.""")
     ]
     
     response = llm.invoke(messages)
-    validated_output = response.content
+    validated_output = strip_think(response.content)
     
     # Estrai il punteggio di qualità se presente
     quality_score = _extract_quality_score(validated_output)
     
-    print(f"[CRITIC_AGENT] Validazione completata. Qualità: {quality_score}/10")
+    print(f"[CRITIC_AGENT] Validazione completata. Autovalutazione: {quality_score if quality_score is not None else 'n/d'}/10")
     
     return {
         **state,
@@ -90,22 +95,18 @@ Fornisci una versione migliorata, accurata e ben strutturata della risposta.""")
     }
 
 
-def _extract_quality_score(text: str) -> float:
+def _extract_quality_score(text: str) -> Optional[float]:
     """
-    Estrae il punteggio di qualità dalla risposta del critico.
-    
+    Estrae l'autovalutazione del critico, accettando grassetto e parentesi.
+
     Args:
         text: Testo della risposta del critico
-    
+
     Returns:
-        Punteggio numerico (default 7.0 se non trovato)
+        Punteggio da 0 a 10, oppure None se assente o fuori scala
     """
-    import re
-    pattern = r"VALUTAZIONE QUALITÀ[:\s]*(\d+(?:\.\d+)?)\s*/\s*10"
-    match = re.search(pattern, text, re.IGNORECASE)
-    if match:
-        try:
-            return float(match.group(1))
-        except ValueError:
-            pass
-    return 7.0
+    match = re.search(r"VALUTAZIONE QUALIT(?:À|A')\W*(\d+(?:[.,]\d+)?)\s*/\s*10", text, re.IGNORECASE)
+    if not match:
+        return None
+    score = float(match.group(1).replace(",", "."))
+    return score if 0 <= score <= 10 else None

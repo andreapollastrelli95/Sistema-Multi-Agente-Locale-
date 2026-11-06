@@ -3,10 +3,12 @@ router.py - Agente Router
 Analizza l'input utente e smista il compito allo specialista corretto.
 """
 
+import re
+
 from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import BaseModel
-from typing import Literal
+
+from agents.utils import strip_think
 
 
 ROUTER_SYSTEM_PROMPT = """Sei un agente router intelligente. Il tuo unico compito è analizzare la richiesta dell'utente e decidere quale agente specialista deve gestirla.
@@ -29,12 +31,6 @@ Non aggiungere spiegazioni, solo la parola chiave dell'agente corretto.
 """
 
 
-class RoutingDecision(BaseModel):
-    agent: Literal["doc_agent", "coder_agent", "critic_agent"]
-    confidence: float
-    reasoning: str
-
-
 def route_query(state: dict, llm: ChatOllama) -> dict:
     """
     Analizza la query utente e determina l'agente appropriato.
@@ -54,21 +50,12 @@ def route_query(state: dict, llm: ChatOllama) -> dict:
     ]
     
     response = llm.invoke(messages)
-    raw_decision = response.content.strip().lower()
-    
-    # Normalizza la risposta
-    agent_map = {
-        "doc_agent": "doc_agent",
-        "coder_agent": "coder_agent", 
-        "critic_agent": "critic_agent",
-    }
-    
-    routed_agent = "doc_agent"  # default fallback: domande generali → doc_agent
-    for key, value in agent_map.items():
-        if key in raw_decision:
-            routed_agent = value
-            break
-    
+    raw_decision = strip_think(response.content).lower()
+
+    # Vale il primo agente citato nella risposta finale, non nel ragionamento
+    match = re.search(r"\b(doc_agent|coder_agent|critic_agent)\b", raw_decision)
+    routed_agent = match.group(1) if match else "doc_agent"
+
     print(f"\n[ROUTER] Query: '{user_query[:60]}...' → Instradato a: {routed_agent}")
     
     return {

@@ -1,9 +1,11 @@
 """
 doc_agent.py - Agente Documenti (RAG)
-Dedicato alla ricerca semantica/ibrida su documenti locali tramite ChromaDB e Ollama embeddings.
+Dedicato alla ricerca semantica su documenti locali tramite ChromaDB e Ollama embeddings.
 """
 
+import hashlib
 import os
+from pathlib import Path
 from typing import Optional
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -14,6 +16,8 @@ from langchain_community.document_loaders import (
     PyPDFLoader,
 )
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+from agents.utils import strip_think
 
 
 DOC_AGENT_SYSTEM_PROMPT = """Sei un agente specializzato nell'analisi e ricerca di documenti.
@@ -30,38 +34,52 @@ CHROMA_PERSIST_DIR = "./chroma_db"
 EMBEDDING_MODEL = "nomic-embed-text"  # Modello embedding locale Ollama
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
+MANIFEST_NAME = ".manifest"
+
+
+def documents_fingerprint(docs_directory: str = DOCS_DIR) -> str:
+    """Impronta di nomi, dimensioni e date dei documenti: cambia quando la cartella cambia."""
+    hasher = hashlib.sha256(f"{EMBEDDING_MODEL}|{CHUNK_SIZE}|{CHUNK_OVERLAP}".encode())
+    root = Path(docs_directory)
+    if root.exists():
+        for path in sorted(p for p in root.rglob("*") if p.suffix.lower() in {".txt", ".pdf"}):
+            stat = path.stat()
+            hasher.update(f"{path.relative_to(root)}|{stat.st_size}|{stat.st_mtime_ns}".encode())
+    return hasher.hexdigest()
 
 
 def build_vector_store(docs_directory: str = DOCS_DIR) -> Optional[Chroma]:
     """
-    Costruisce o carica il vector store ChromaDB dai documenti locali.
-    
+    Carica il vector store ChromaDB oppure lo ricostruisce se i documenti sono cambiati.
+
     Args:
         docs_directory: Percorso alla cartella dei documenti
-    
+
     Returns:
         Istanza ChromaDB o None se non ci sono documenti
     """
     embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL)
-    
-    # Carica il vector store esistente se disponibile
+    manifest = Path(CHROMA_PERSIST_DIR) / MANIFEST_NAME
+    fingerprint = documents_fingerprint(docs_directory)
+
     if os.path.exists(CHROMA_PERSIST_DIR):
-        print(f"[DOC_AGENT] Caricamento vector store esistente da '{CHROMA_PERSIST_DIR}'...")
-        return Chroma(
-            persist_directory=CHROMA_PERSIST_DIR,
-            embedding_function=embeddings,
-        )
-    
+        store = Chroma(persist_directory=CHROMA_PERSIST_DIR, embedding_function=embeddings)
+        if manifest.exists() and manifest.read_text(encoding="utf-8") == fingerprint:
+            print(f"[DOC_AGENT] Indice aggiornato caricato da '{CHROMA_PERSIST_DIR}'.")
+            return store
+        print("[DOC_AGENT] Documenti modificati: ricostruisco l'indice...")
+        store.delete_collection()
+
     # Controlla se esiste la directory dei documenti
     if not os.path.exists(docs_directory):
         print(f"[DOC_AGENT] Directory documenti '{docs_directory}' non trovata. Creazione...")
         os.makedirs(docs_directory, exist_ok=True)
         return None
-    
+
     # Carica i documenti disponibili
     documents = []
     loaders = [
-        DirectoryLoader(docs_directory, glob="**/*.txt", loader_cls=TextLoader, silent_errors=True),
+        DirectoryLoader(docs_directory, glob="**/*.txt", loader_cls=TextLoader, loader_kwargs={"autodetect_encoding": True}, silent_errors=True),
         DirectoryLoader(docs_directory, glob="**/*.pdf", loader_cls=PyPDFLoader, silent_errors=True),
     ]
     
@@ -91,7 +109,8 @@ def build_vector_store(docs_directory: str = DOCS_DIR) -> Optional[Chroma]:
         embedding=embeddings,
         persist_directory=CHROMA_PERSIST_DIR,
     )
-    
+    manifest.write_text(fingerprint, encoding="utf-8")
+
     return vector_store
 
 
@@ -165,7 +184,7 @@ Fornisci una risposta basata sul contesto recuperato.""")
     
     return {
         **state,
-        "agent_output": response.content,
+        "agent_output": strip_think(response.content),
         "agent_used": "doc_agent",
         "retrieved_context": context,
     }

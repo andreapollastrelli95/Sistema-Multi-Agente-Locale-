@@ -3,11 +3,16 @@ coder_agent.py - Agente Coder & Data Analysis
 Specializzato nella scrittura ed esecuzione di codice Python e data analysis.
 """
 
+import ast
+import os
+import subprocess
 import sys
-import io
-import traceback
+import tempfile
+
 from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage, SystemMessage
+
+from agents.utils import strip_think
 
 
 CODER_SYSTEM_PROMPT = """Sei un esperto ingegnere software e data scientist Python.
@@ -23,35 +28,53 @@ Quando scrivi codice:
 - Gestisci le eccezioni dove necessario
 - Preferisci soluzioni idiomatiche Python
 
-Se ti viene chiesto di eseguire codice, fornisci prima il codice e poi l'output atteso.
+Il codice puo' usare solo: pandas, numpy e librerie standard di calcolo. Non leggere o scrivere file.
 """
 
-SAFE_BUILTINS = {
-    "print": print,
-    "len": len,
-    "range": range,
-    "enumerate": enumerate,
-    "zip": zip,
-    "map": map,
-    "filter": filter,
-    "sorted": sorted,
-    "sum": sum,
-    "min": max,
-    "max": max,
-    "abs": abs,
-    "round": round,
-    "int": int,
-    "float": float,
-    "str": str,
-    "list": list,
-    "dict": dict,
-    "tuple": tuple,
-    "set": set,
-    "bool": bool,
-    "type": type,
-    "isinstance": isinstance,
-    "__import__": __import__,
+ALLOWED_IMPORTS = {
+    "pandas", "numpy", "math", "statistics", "json", "datetime", "re",
+    "collections", "itertools", "functools", "random", "decimal", "string",
 }
+BLOCKED_NAMES = {
+    "open", "exec", "eval", "compile", "__import__", "globals", "locals",
+    "getattr", "setattr", "delattr", "vars", "input", "breakpoint", "memoryview",
+}
+EXECUTION_TIMEOUT_SECONDS = 30
+
+
+def validate_code(code: str) -> list[str]:
+    """
+    Applica una lista di operazioni consentite al codice generato dal modello.
+    Riduce i rischi ma non equivale a una sandbox: per questo l'esecuzione e' disattivata di default.
+
+    Returns:
+        Elenco dei problemi trovati; vuoto se il codice puo' essere eseguito
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as exc:
+        return [f"Errore di sintassi: {exc}"]
+
+    problems = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            modules = [node.module or ""]
+        else:
+            modules = []
+        problems.extend(
+            f"Import non consentito: {module}"
+            for module in modules
+            if module.split(".")[0] not in ALLOWED_IMPORTS
+        )
+        if isinstance(node, ast.Name) and node.id in BLOCKED_NAMES:
+            problems.append(f"Funzione non consentita: {node.id}")
+        if isinstance(node, ast.Attribute) and node.attr.startswith("_"):
+            problems.append(f"Attributo non consentito: {node.attr}")
+        if isinstance(node, ast.Attribute) and node.attr.startswith(("read_", "to_")):
+            problems.append(f"Accesso a file non consentito: {node.attr}")
+    return problems
 
 
 def extract_code_blocks(text: str) -> list[str]:
@@ -85,55 +108,40 @@ def extract_code_blocks(text: str) -> list[str]:
 
 def execute_python_code(code: str) -> tuple[str, str]:
     """
-    Esegue codice Python in modo sicuro e cattura stdout/stderr.
-    
+    Esegue il codice in un processo separato, in una cartella temporanea e con un limite di tempo.
+
     Args:
         code: Codice Python da eseguire
-    
+
     Returns:
         Tuple (output, error)
     """
-    stdout_capture = io.StringIO()
-    stderr_capture = io.StringIO()
-    
-    # Namespace di esecuzione con le librerie consentite
-    exec_globals = {
-        "__builtins__": SAFE_BUILTINS,
-        "__name__": "__main__",
-    }
-    
-    # Importa librerie di analisi dati nel namespace
-    try:
-        import pandas as pd
-        import numpy as np
-        exec_globals["pd"] = pd
-        exec_globals["np"] = np
-    except ImportError:
-        pass
-    
-    old_stdout = sys.stdout
-    old_stderr = sys.stderr
-    sys.stdout = stdout_capture
-    sys.stderr = stderr_capture
-    
-    error_output = ""
-    try:
-        exec(code, exec_globals)
-    except Exception:
-        error_output = traceback.format_exc()
-    finally:
-        sys.stdout = old_stdout
-        sys.stderr = old_stderr
-    
-    stdout_output = stdout_capture.getvalue()
-    stderr_output = stderr_capture.getvalue()
-    
-    return stdout_output, error_output or stderr_output
+    problems = validate_code(code)
+    if problems:
+        return "", "Esecuzione bloccata. " + "; ".join(problems)
+
+    env = {key: os.environ[key] for key in ("PATH", "SYSTEMROOT", "TEMP", "TMP") if key in os.environ}
+    env["PYTHONIOENCODING"] = "utf-8"
+    with tempfile.TemporaryDirectory() as folder:
+        try:
+            result = subprocess.run(
+                [sys.executable, "-I", "-c", code],
+                cwd=folder,
+                env=env,
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=EXECUTION_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return "", f"Esecuzione interrotta dopo {EXECUTION_TIMEOUT_SECONDS} secondi."
+    return result.stdout, result.stderr
 
 
 def run_coder_agent(state: dict, llm: ChatOllama) -> dict:
     """
-    Esegue l'agente coder: genera codice, lo esegue e restituisce i risultati.
+    Esegue l'agente coder: genera codice e, se autorizzato, lo esegue.
     
     Args:
         state: Stato condiviso del sistema
@@ -152,13 +160,16 @@ def run_coder_agent(state: dict, llm: ChatOllama) -> dict:
     ]
     
     response = llm.invoke(messages)
-    generated_code_response = response.content
+    generated_code_response = strip_think(response.content)
     
     # Estrai ed esegui eventuali blocchi di codice
     code_blocks = extract_code_blocks(generated_code_response)
     execution_results = []
     
-    if code_blocks:
+    allow_execution = bool(state.get("allow_code_execution"))
+    if code_blocks and not allow_execution:
+        print("[CODER_AGENT] Esecuzione disattivata: avvia con --esegui-codice per abilitarla.")
+    if code_blocks and allow_execution:
         print(f"[CODER_AGENT] Rilevati {len(code_blocks)} blocchi di codice. Esecuzione...")
         for i, code in enumerate(code_blocks, 1):
             stdout, error = execute_python_code(code)
